@@ -12,6 +12,51 @@ from torch_geometric.nn.conv.gcn_conv import GCNConv
 NEAR_INF = 1e20
 NEAR_INF_FP16 = 65504
 
+class MyCLUB(nn.Module):
+    def __init__(self, x_dim, y_dim, hidden_size):
+        super(MyCLUB, self).__init__()
+        self.p_mu = nn.Sequential(
+            nn.Linear(x_dim, hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size//2, y_dim)
+        )
+        self.p_logvar = nn.Sequential(
+            nn.Linear(x_dim, hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size//2, y_dim),
+            nn.Tanh()
+        )
+        self.relu = nn.ReLU()
+
+    def get_mu_logvar(self, x_samples):
+        mu = self.p_mu(x_samples)
+        logvar = self.p_logvar(x_samples)
+        return mu, logvar
+
+    def forward(self, x_samples, y_samples, z_samples):
+        mu, logvar = self.get_mu_logvar(x_samples)
+
+        # Log-likelihood of positive sample pairs
+        positive = - ((mu - y_samples)**2 + (mu - z_samples)**2) / (2. * logvar.exp())
+
+        # Constructing pairs for negative log-likelihood
+        prediction_1 = mu.unsqueeze(1)  # shape [nsample,1,dim]
+        y_samples_1 = y_samples.unsqueeze(0)  # shape [1,nsample,dim]
+        z_samples_1 = z_samples.unsqueeze(0)  # shape [1,nsample,dim]
+
+        # Log-likelihood of negative sample pairs
+        negative = - ((y_samples_1 - prediction_1)**2 + (z_samples_1 - prediction_1)**2).mean(dim=1) / (2. * logvar.exp())
+
+        # CLUB estimation
+        return (self.relu(positive.sum(dim=-1) - negative.sum(dim=-1))).mean()
+
+    def loglikeli(self, x_samples, y_samples, z_samples):
+        mu, logvar = self.get_mu_logvar(x_samples)
+        return (-(mu - y_samples)**2 / logvar.exp() - (mu - z_samples)**2 / logvar.exp() - logvar).sum(dim=1).mean(dim=0)
+
+    def learning_loss(self, x_samples, y_samples, z_samples):
+        return -self.loglikeli(x_samples, y_samples, z_samples)
+
 
 def create_position_codes(n_pos, dim, out):
     position_enc = np.array([[pos / np.power(10000, 2 * j / dim) for j in range(dim // 2)] for pos in range(n_pos)])
@@ -337,6 +382,7 @@ class CrossModel(nn.Module):
         # self.con_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
         # self.db_output = nn.Linear(self.hidden_dim, self.n_entity)
         # self.con_output = nn.Linear(self.hidden_dim, self.n_concept + 1)
+        self.club_mi = MyCLUB(self.hidden_dim, self.hidden_dim, self.hidden_dim)
         self.user_db_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
         self.user_con_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
         self.db_con_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
@@ -387,17 +433,7 @@ class CrossModel(nn.Module):
         user_graph_emb = con_nodes_features[user_mentioned]
         user_graph_attn_emb, attention = self.user_graph_attn(user_graph_emb, (user_mentioned == 0).to(self.device))
         # info_loss
-        con_scores = F.linear(self.user_db_info_fc(torch.cat([user_graph_attn_emb, db_graph_attn_emb], dim=-1)), con_nodes_features, self.con_output.bias)
-        db_scores = F.linear(self.user_con_info_fc(torch.cat([user_graph_attn_emb, con_graph_attn_emb], dim=-1)), db_nodes_features, self.db_output.bias)
-        user_scores = F.linear(self.db_con_info_fc(torch.cat([db_graph_attn_emb, con_graph_attn_emb], dim=-1)), user_nodes_features, self.user_output.bias)
-        info_db_loss = torch.mean(torch.sum(self.mse_loss(db_scores, dbpedia_vector.float()), dim=-1))
-        info_con_loss = torch.mean(torch.sum(self.mse_loss(con_scores, concept_vector.float()), dim=-1))
-        info_user_loss = torch.mean(torch.sum(self.mse_loss(user_scores, user_vector.float()), dim=-1))
-
-        # con_scores = F.linear(self.db_info_fc(db_graph_attn_emb), con_nodes_features, self.con_output.bias)
-        # db_scores = F.linear(self.con_info_fc(con_graph_attn_emb), db_nodes_features, self.db_output.bias)
-        # info_db_loss = torch.mean(torch.sum(self.mse_loss(db_scores, dbpedia_vector.to(self.device).float()), dim=-1) * db_con_mask.to(self.device))
-        # info_con_loss = torch.mean(torch.sum(self.mse_loss(con_scores, concept_vector.to(self.device).float()), dim=-1) * db_con_mask.to(self.device))
+        mutual_loss = self.club_mi(user_graph_attn_emb, db_graph_attn_emb, con_graph_attn_emb)
 
         # 通过user_emb和db_nodes_features计算rec_scores，对比labels得到rec_loss
         uc_gate = F.sigmoid(self.gate_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb], dim=-1))))
@@ -449,7 +485,7 @@ class CrossModel(nn.Module):
             scores = logits
             preds = predict_vector
             gen_loss = None
-        return scores, preds, rec_scores, rec_loss, gen_loss, info_db_loss, info_con_loss
+        return scores, preds, rec_scores, rec_loss, gen_loss, mutual_loss, 0
 
     def _edge_list(self):
         edge_list = []
