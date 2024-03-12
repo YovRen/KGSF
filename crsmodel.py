@@ -377,22 +377,12 @@ class CrossModel(nn.Module):
         self.con_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
         self.user_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
         self.db_graph_attn = SelfAttentionLayer(self.hidden_dim, self.hidden_dim)
-        # info_loss部分的参数
-        # self.db_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
-        # self.con_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
-        # self.db_output = nn.Linear(self.hidden_dim, self.n_entity)
-        # self.con_output = nn.Linear(self.hidden_dim, self.n_concept + 1)
+        # mutual_loss部分的参数
         self.club_mi = MyCLUB(self.hidden_dim, self.hidden_dim, self.hidden_dim)
-        self.user_db_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
-        self.user_con_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
-        self.db_con_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
-        self.user_output = nn.Linear(self.hidden_dim, self.n_user)
-        self.con_output = nn.Linear(self.hidden_dim, self.n_concept + 1)
-        self.db_output = nn.Linear(self.hidden_dim, self.n_entity)
-        self.mse_loss = nn.MSELoss(size_average=False, reduce=False)
         # rec_loss部分的参数
-        self.user_fc = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
-        self.gate_fc = nn.Linear(self.hidden_dim, 1)
+        self.user_fc = nn.Linear(self.hidden_dim * 3, self.hidden_dim)
+        self.gate1_fc = nn.Linear(self.hidden_dim, 1)
+        self.gate2_fc = nn.Linear(self.hidden_dim, 1)
         self.criterion = nn.CrossEntropyLoss(reduce=False)
         # sum_embeddings
         self.embeddings = nn.Embedding(len(dictionary) + 4, self.embedding_size, self.pad_idx)
@@ -434,10 +424,11 @@ class CrossModel(nn.Module):
         user_graph_attn_emb, attention = self.user_graph_attn(user_graph_emb, (user_mentioned == 0).to(self.device))
         # info_loss
         mutual_loss = self.club_mi(user_graph_attn_emb, db_graph_attn_emb, con_graph_attn_emb)
-
         # 通过user_emb和db_nodes_features计算rec_scores，对比labels得到rec_loss
-        uc_gate = F.sigmoid(self.gate_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb], dim=-1))))
-        user_emb = uc_gate * db_graph_attn_emb + (1 - uc_gate) * con_graph_attn_emb
+        uc_gate1 = F.sigmoid(self.gate1_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
+        uc_gate2 = F.sigmoid(self.gate2_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
+
+        user_emb = uc_gate1 * db_graph_attn_emb +uc_gate2 * con_graph_attn_emb+(1-uc_gate1-uc_gate2)*user_graph_attn_emb
         rec_scores = F.linear(user_emb, db_nodes_features, self.graph_rec_output.bias)
         rec_loss = torch.sum(self.criterion(rec_scores, labels.to(self.device)) * rec.float().to(self.device))
         # 计算gen_scores和preds--------可以把历史记录的movie_fc加上--------------------|##|Aab******#|Bc******#|Ac******#|Bc********#|-------------
