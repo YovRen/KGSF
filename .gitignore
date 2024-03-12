@@ -1,0 +1,5 @@
+*net_parameter.pkl
+__pycache__/
+.idea/
+nltk_data/
+pip/
