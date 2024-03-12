@@ -9,6 +9,8 @@ from copy import deepcopy
 import gensim
 import torch
 import pickle as pkl
+
+
 # 1.
 
 class CRSDataset(Dataset):
@@ -20,6 +22,7 @@ class CRSDataset(Dataset):
         self.max_r_length = args.max_r_length
         self.n_entity = args.n_entity
         self.n_concept = args.n_concept + 1
+        self.n_user = args.n_user
         self.entity2entityId = args.entity2entityId
         self.userId2userIdx = args.userId2userIdx
         self.id2entity = args.id2entity
@@ -100,16 +103,18 @@ class CRSDataset(Dataset):
         cases = []
         contexts = []
         entities = []
+        users = []
         for message_dict in message_list:
             self.corpus.append(message_dict['text'])
             if message_dict['user'] == respondentWorkerId and len(contexts) > 0:
                 response = message_dict['text']
                 if len(message_dict['movie']) != 0:
                     for movie in message_dict['movie']:
-                        cases.append({'contexts': deepcopy(contexts), 'response': response, 'entity': deepcopy(entities), 'movie': movie, 'rec': 1})
+                        cases.append({'contexts': deepcopy(contexts), 'response': response, 'users': users, 'user': message_dict['user'], 'entity': deepcopy(entities), 'movie': movie, 'rec': 1})
                 else:
-                    cases.append({'contexts': deepcopy(contexts), 'response': response, 'entity': deepcopy(entities), 'movie': 0, 'rec': 0})
+                    cases.append({'contexts': deepcopy(contexts), 'response': response, 'users': users, 'user': message_dict['user'], 'entity': deepcopy(entities), 'movie': 0, 'rec': 0})
             contexts.append(message_dict['text'])
+            users.append(message_dict['user'])
             for word in message_dict['entity']:
                 if word not in entities:
                     entities.append(word)
@@ -165,15 +170,14 @@ class CRSDataset(Dataset):
             if is_finetune and case['contexts'] == context_before:
                 continue
             else:
-                context_before = case['contexts']
-                #区别
+                context_before = case['contexts']  # 区别
             contexts = sum((sen + ['_split_'] for sen in case['contexts'][-5:-1]), []) + case['contexts'][-1]
             context_vector, context_length, concept_mask, dbpedia_mask = padding_word2vev(contexts, self.max_c_length)
             response_vector, r_length, _, _ = padding_word2vev(case['response'], self.max_r_length)
             assert len(context_vector) == self.max_c_length
             assert len(concept_mask) == self.max_c_length
             assert len(dbpedia_mask) == self.max_c_length
-            data_set.append([np.array(context_vector), np.array(response_vector), case['entity'], case['movie'], concept_mask, dbpedia_mask, case['rec']])
+            data_set.append([np.array(context_vector), np.array(response_vector), case['users'], case['user'], case['entity'], case['movie'], concept_mask, dbpedia_mask, case['rec']])
         return data_set
 
     def co_occurance_ext(self, cases):
@@ -227,7 +231,6 @@ class CRSDataset(Dataset):
         f.close()
         json.dump(list(movie_wordset), open('data/movie_word.json', 'w', encoding='utf-8'), ensure_ascii=False)
 
-
     def prepare_dbpedia_subkg(self):
         subkg = defaultdict(list)
         relation_cnt = defaultdict(int)
@@ -270,9 +273,9 @@ class CRSDataset(Dataset):
 
         json.dump(subkg, open(self.crs_data_path + '/dbpedia_subkg.jsonl', 'w', encoding='utf-8'), ensure_ascii=False)
 
-
     def __getitem__(self, index):
-        context_vector, response_vector, entity, movie, concept_mask, dbpedia_mask, rec = self.datapre[index]
+        context_vector, response_vector, users, user, entity, movie, concept_mask, dbpedia_mask, rec = self.datapre[index]
+
         entity_vec = np.zeros(self.n_entity)
         dbpedia_mentioned = np.zeros(50)
         point = 0
@@ -290,7 +293,16 @@ class CRSDataset(Dataset):
         for db in dbpedia_mask:
             if db != 0:
                 dbpedia_vector[db] = 1
-        return context_vector,  response_vector, entity_vec, torch.tensor(dbpedia_mentioned, dtype=torch.long), movie, torch.tensor(concept_mask, dtype=torch.long), np.array(dbpedia_mask), concept_vector, dbpedia_vector, rec
+
+        user_mentioned = np.zeros(60)
+        user_vector = np.zeros(self.n_user)
+        point = 0
+        for us in users:
+            if us != 0:
+                user_vector[self.userId2userIdx[str(us)]] = 1
+                user_mentioned[point] = us
+                point += 1
+        return context_vector, response_vector, entity_vec, torch.tensor(dbpedia_mentioned, dtype=torch.long), torch.tensor(user_mentioned, dtype=torch.long), movie, torch.tensor(concept_mask, dtype=torch.long), np.array(dbpedia_mask), concept_vector, dbpedia_vector, user_vector, rec
 
     def __len__(self):
         return len(self.datapre)

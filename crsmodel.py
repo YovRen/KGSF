@@ -330,12 +330,19 @@ class CrossModel(nn.Module):
         nn.init.normal_(self.concept_embeddings.weight, mean=0, std=self.hidden_dim ** -0.5)
         nn.init.constant_(self.concept_embeddings.weight[0], 0)
         self.con_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
+        self.user_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
         self.db_graph_attn = SelfAttentionLayer(self.hidden_dim, self.hidden_dim)
         # info_loss部分的参数
-        self.db_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.con_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.db_output = nn.Linear(self.hidden_dim, self.n_entity)
+        # self.db_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
+        # self.con_info_fc = nn.Linear(self.hidden_dim, self.hidden_dim)
+        # self.db_output = nn.Linear(self.hidden_dim, self.n_entity)
+        # self.con_output = nn.Linear(self.hidden_dim, self.n_concept + 1)
+        self.user_db_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
+        self.user_con_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
+        self.db_con_info_fc = nn.Linear(self.hidden_dim*2, self.hidden_dim)
+        self.user_output = nn.Linear(self.hidden_dim, self.n_user)
         self.con_output = nn.Linear(self.hidden_dim, self.n_concept + 1)
+        self.db_output = nn.Linear(self.hidden_dim, self.n_entity)
         self.mse_loss = nn.MSELoss(size_average=False, reduce=False)
         # rec_loss部分的参数
         self.user_fc = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
@@ -356,8 +363,10 @@ class CrossModel(nn.Module):
         self.decoder_graph_latent_fc_gen_fc = nn.Linear(self.embedding_size, len(dictionary) + 4)
         self.graph_rec_output = nn.Linear(self.hidden_dim, self.n_entity)
 
-    def forward(self, context_vector, response_vector, concept_mask, db_mask, seed_sets, labels, concept_vector, dbpedia_vector, dbpedia_mentioned, rec):
-        db_nodes_features = self.dbpedia_RGCN(None, self.db_edge_idx, self.db_edge_type)[:self.n_entity]
+    def forward(self, context_vector, response_vector, concept_mask, db_mask, seed_sets, labels, concept_vector, dbpedia_vector, user_vector,  dbpedia_mentioned, user_mentioned, rec):
+        dbpedia_nodes_features = self.dbpedia_RGCN(None, self.db_edge_idx, self.db_edge_type)
+        db_nodes_features = dbpedia_nodes_features[:self.n_entity]
+        user_nodes_features = dbpedia_nodes_features[self.n_entity:]
         con_nodes_features = self.concept_GCN(self.concept_embeddings.weight, self.concept_edge_sets)
         # 也是基础特征
         dbpedias_emb_list = []
@@ -375,11 +384,20 @@ class CrossModel(nn.Module):
         db_con_mask = torch.stack(db_con_mask)
         con_graph_emb = con_nodes_features[concept_mask]
         con_graph_attn_emb, attention = self.con_graph_attn(con_graph_emb, (concept_mask == self.concept_padding).to(self.device))
+        user_graph_emb = con_nodes_features[user_mentioned]
+        user_graph_attn_emb, attention = self.user_graph_attn(user_graph_emb, (user_mentioned == 0).to(self.device))
         # info_loss
-        con_scores = F.linear(self.db_info_fc(db_graph_attn_emb), con_nodes_features, self.con_output.bias)
-        db_scores = F.linear(self.con_info_fc(con_graph_attn_emb), db_nodes_features, self.db_output.bias)
-        info_db_loss = torch.mean(torch.sum(self.mse_loss(db_scores, dbpedia_vector.to(self.device).float()), dim=-1) * db_con_mask.to(self.device))
-        info_con_loss = torch.mean(torch.sum(self.mse_loss(con_scores, concept_vector.to(self.device).float()), dim=-1) * db_con_mask.to(self.device))
+        con_scores = F.linear(self.user_db_info_fc(torch.cat([user_graph_attn_emb, db_graph_attn_emb], dim=-1)), con_nodes_features, self.con_output.bias)
+        db_scores = F.linear(self.user_con_info_fc(torch.cat([user_graph_attn_emb, con_graph_attn_emb], dim=-1)), db_nodes_features, self.db_output.bias)
+        user_scores = F.linear(self.db_con_info_fc(torch.cat([db_graph_attn_emb, con_graph_attn_emb], dim=-1)), user_nodes_features, self.user_output.bias)
+        info_db_loss = torch.mean(torch.sum(self.mse_loss(db_scores, dbpedia_vector.float()), dim=-1))
+        info_con_loss = torch.mean(torch.sum(self.mse_loss(con_scores, concept_vector.float()), dim=-1))
+        info_user_loss = torch.mean(torch.sum(self.mse_loss(user_scores, user_vector.float()), dim=-1))
+
+        # con_scores = F.linear(self.db_info_fc(db_graph_attn_emb), con_nodes_features, self.con_output.bias)
+        # db_scores = F.linear(self.con_info_fc(con_graph_attn_emb), db_nodes_features, self.db_output.bias)
+        # info_db_loss = torch.mean(torch.sum(self.mse_loss(db_scores, dbpedia_vector.to(self.device).float()), dim=-1) * db_con_mask.to(self.device))
+        # info_con_loss = torch.mean(torch.sum(self.mse_loss(con_scores, concept_vector.to(self.device).float()), dim=-1) * db_con_mask.to(self.device))
 
         # 通过user_emb和db_nodes_features计算rec_scores，对比labels得到rec_loss
         uc_gate = F.sigmoid(self.gate_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb], dim=-1))))

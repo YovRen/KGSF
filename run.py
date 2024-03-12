@@ -65,14 +65,14 @@ class TrainLoop():
         best_val=10000
         for i in range(rec_epoch + gen_epoch):
             self.model.train()
-            for num, (context,response,entity,dbpedia_mentioned,movie,concept_mask,dbpedia_mask,concept_vector, dbpedia_vector,rec) in enumerate(tqdm(self.train_dataloader)):
+            for num, (context,response,entity,dbpedia_mentioned, user_mentioned,movie,concept_mask,dbpedia_mask,concept_vector, dbpedia_vector,user_vector, rec) in enumerate(tqdm(self.train_dataloader)):
                 seed_sets = []
                 batch_size = context.shape[0]
                 for b in range(batch_size):
                     seed_set = entity[b].nonzero().view(-1).tolist()
                     seed_sets.append(seed_set)
                 self.optimizer.zero_grad()
-                _, _, _, rec_loss, gen_loss, info_db_loss, _=self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector, dbpedia_vector, dbpedia_mentioned.to(self.device), rec)
+                _, _, _, rec_loss, gen_loss, info_db_loss, _=self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device),user_vector.to(self.device),  dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
                 if i < rec_epoch:
                     joint_loss=rec_loss+0.025*info_db_loss
                 else:
@@ -130,15 +130,15 @@ class TrainLoop():
         tokens_predict=[]
         tokens_context=[]
         losses=[]
-        for context,  response,  entity, dbpedia_mentioned, movie, concept_mask, dbpedia_mask, concept_vector, dbpedia_vector, rec in tqdm(val_dataloader):
+        for context,  response,  entity, dbpedia_mentioned, user_mentioned, movie, concept_mask, dbpedia_mask, concept_vector, dbpedia_vector,user_vector,  rec in tqdm(val_dataloader):
             with torch.no_grad():
                 seed_sets = []
                 batch_size = context.shape[0]
                 for b in range(batch_size):
                     seed_set = entity[b].nonzero().view(-1).tolist()
                     seed_sets.append(seed_set)
-                scores, preds, rec_scores, rec_loss, gen_loss, info_db_loss, info_con_loss = self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector, dbpedia_vector, dbpedia_mentioned.to(self.device), rec)
-                _, preds, _, _, _, _, _ = self.model(context.to(self.device), None, concept_mask, dbpedia_mask, seed_sets, movie, concept_vector, dbpedia_vector, dbpedia_mentioned.to(self.device), rec)
+                scores, preds, rec_scores, rec_loss, gen_loss, info_db_loss, info_con_loss = self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device),user_vector.to(self.device),  dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
+                _, preds, _, _, _, _, _ = self.model(context.to(self.device), None, concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device),user_vector.to(self.device),  dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
             tokens_response.extend(vector2sentence(response.cpu()))
             tokens_predict.extend(vector2sentence(preds.cpu()))
             tokens_context.extend(vector2sentence(context.cpu()))
