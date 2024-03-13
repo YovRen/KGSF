@@ -44,9 +44,9 @@ class CRSDataset(Dataset):
             cases = self._context_reformulate(messages, movieMentions, respondentQuestions, initiatorQuestions, initiatorWorkerId, respondentWorkerId)
             self.cases.extend(cases)
 
-        self.word2index = json.load(open('data/word2index_redial.json', encoding='utf-8'))
-        self.key2index = json.load(open('data/key2index_3rd.json', encoding='utf-8'))
-        self.stopwords = set([word.strip() for word in open('data/stopwords.txt', encoding='utf-8')])
+        self.word2index = json.load(open(self.crs_data_path+'/word2index_redial.json', encoding='utf-8'))
+        self.key2index = json.load(open(self.crs_data_path+'/key2index_3rd.json', encoding='utf-8'))
+        self.stopwords = set([word.strip() for word in open(self.crs_data_path+'/stopwords.txt', encoding='utf-8')])
         # self.prepare_word2vec()
         self.datapre = self.data_process(is_finetune=False)
         # self.co_occurance_ext(self.cases)  # exit()

@@ -42,33 +42,35 @@ class TrainLoop:
         self.attention_dropout = 0.0
         self.relu_dropout = 0.1
         self.special_wordIdx = {'<pad>': 0, '<dbpedia>': 1, '<related>': 2, '<relation>': 3, '<concept>': 4, '<word>': 5, '<unk>': 6, '<user>': 7, '<mood>': 8, '<split>': 9, '<eos>': 10}
-        self.entity2entityId = pkl.load(open('data/entity2entityId.pkl', 'rb'))
-        self.id2entity = pkl.load(open('data/id2entity.pkl', 'rb'))
-        self.text_dict = pkl.load(open('data/text_dict.pkl', 'rb'))
+        self.entity2entityId = pkl.load(open(self.crs_data_path + '/entity2entityId.pkl', 'rb'))
+        self.id2entity = pkl.load(open(self.crs_data_path + '/id2entity.pkl', 'rb'))
+        self.text_dict = pkl.load(open(self.crs_data_path + '/text_dict.pkl', 'rb'))
         self.userId2userIdx = json.load(open(self.crs_data_path + '/redial_userId2userIdx.jsonl', encoding='utf-8'))
         self.dbpedia_subkg = json.load(open(self.crs_data_path + '/dbpedia_subkg.jsonl', encoding='utf-8'))
-        self.train_dataset=CRSDataset('toy_train', self)
-        self.test_dataset = CRSDataset('toy_test', self)
-        self.valid_dataset = CRSDataset('toy_valid', self)
-        # self.train_dataset = CRSDataset('train', self)
-        # self.test_dataset = CRSDataset('test', self)
-        # self.valid_dataset = CRSDataset('valid', self)
+        # self.train_dataset=CRSDataset('toy_train', self)
+        # self.test_dataset = CRSDataset('toy_test', self)
+        # self.valid_dataset = CRSDataset('toy_valid', self)
+        self.train_dataset = CRSDataset('train', self)
+        self.test_dataset = CRSDataset('test', self)
+        self.valid_dataset = CRSDataset('valid', self)
         self.train_dataloader = torch.utils.data.DataLoader(dataset=self.train_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.test_dataloader = torch.utils.data.DataLoader(dataset=self.test_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.valid_dataloader = torch.utils.data.DataLoader(dataset=self.valid_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.metrics_rec = {"rec_loss": 0, "recall@1": 0, "recall@10": 0, "recall@50": 0, "count": 0}
         self.metrics_gen = {"gen_loss": 0, "dist1": 0, "dist2": 0, "dist3": 0, "dist4": 0, "bleu1": 0, "bleu2": 0, "bleu3": 0, "bleu4": 0, "count": 0}
         self.dict = self.train_dataset.word2index
-        self.movie_ids = pkl.load(open("data/movie_ids.pkl", "rb"))
+        self.movie_ids = pkl.load(open(self.crs_data_path + "/movie_ids.pkl", "rb"))
         self.index2word = {self.dict[key]: key for key in self.dict}
         self.model = CrossModel(self).to(self.device)
         self.optimizer = {k.lower(): v for k, v in torch.optim.__dict__.items() if not k.startswith('__') and k[0].isupper()}[self.optimizer]([p for p in self.model.parameters() if p.requires_grad], lr=self.learningrate, amsgrad=True, betas=(0.9, 0.999))
 
-    def train(self, rec_epoch, gen_epoch):
+    def train(self, mi_epoch, rec_epoch, gen_epoch):
         losses = []
         best_val = 10000
-        for i in range(rec_epoch + gen_epoch):
-            self.model.train()
+        self.model.freeze_kg(False)
+        for i in range(mi_epoch + rec_epoch + gen_epoch):
+            if i == mi_epoch + rec_epoch:
+                self.model.freeze_kg(True)
             for num, (context, response, entity, dbpedia_mentioned, user_mentioned, movie, concept_mask, dbpedia_mask, concept_vector, dbpedia_vector, user_vector, rec) in enumerate(tqdm(self.train_dataloader)):
                 seed_sets = []
                 batch_size = context.shape[0]
@@ -77,7 +79,9 @@ class TrainLoop:
                     seed_sets.append(seed_set)
                 self.optimizer.zero_grad()
                 _, _, _, rec_loss, gen_loss, mi_loss = self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device), user_vector.to(self.device), dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
-                if i < rec_epoch:
+                if i < mi_epoch:
+                    joint_loss = rec_loss + 0.025 * mi_loss
+                elif i < mi_epoch + rec_epoch:
                     joint_loss = rec_loss
                 else:
                     joint_loss = gen_loss
@@ -86,22 +90,30 @@ class TrainLoop:
                 self.optimizer.step()
                 if self.gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
-                losses.append([gen_loss, rec_loss, mi_loss, joint_loss])
+                losses.append([mi_loss, rec_loss, gen_loss, joint_loss])
                 if (num + 1) % (512 / self.batch_size) == 0:
-                    print('gen_loss is %f' % (sum([l[0] for l in losses]) / len(losses)))
+                    print('\nEpoch\t%d/[%d,%d,%d]--------------' % (i, mi_epoch, rec_epoch, gen_epoch))
+                    print('mi_loss is %f' % (sum([l[0] for l in losses]) / len(losses)))
                     print('rec_loss is %f' % (sum([l[1] for l in losses]) / len(losses)))
-                    print('mi_loss is %f' % (sum([l[2] for l in losses]) / len(losses)))
+                    print('gen_loss is %f' % (sum([l[2] for l in losses]) / len(losses)))
                     print('joint_loss is %f' % (sum([l[3] for l in losses]) / len(losses)))
                     losses = []
-            output_metrics_rec, output_metrics_gen = self.val()
-            if i < rec_epoch:
+            output_metrics_rec, output_metrics_gen = self.val(is_test=False)
+            if i < mi_epoch:
+                self.model.save_model('mi')
+                print("mutual_information model saved once------------------------------------------------")
+            elif i == mi_epoch:
+                best_val = output_metrics_rec["rec_loss"]
+                self.model.save_model('rec')
+                print("recommendation model saved once------------------------------------------------")
+            elif i < mi_epoch + rec_epoch:
                 if best_val < output_metrics_rec["rec_loss"]:
                     break
                 else:
                     best_val = output_metrics_rec["rec_loss"]
                     self.model.save_model('rec')
                     print("recommendation model saved once------------------------------------------------")
-            elif i == rec_epoch:
+            elif i == mi_epoch + rec_epoch:
                 best_val = output_metrics_gen["gen_loss"]
                 self.model.save_model('gen')
                 print("generator model saved once------------------------------------------------")
@@ -116,6 +128,8 @@ class TrainLoop:
     def val(self, is_test=False):
         self.model.eval()
         val_dataloader = self.test_dataloader if is_test else self.valid_dataloader
+        self.metrics_rec = {"rec_loss": 0, "recall@1": 0, "recall@10": 0, "recall@50": 0, "count": 0}
+        self.metrics_gen = {"gen_loss": 0, "dist1": 0, "dist2": 0, "dist3": 0, "dist4": 0, "bleu1": 0, "bleu2": 0, "bleu3": 0, "bleu4": 0, "count": 0}
 
         def vector2sentence(batch_sen):
             sentences = []
@@ -207,6 +221,6 @@ class TrainLoop:
 
 if __name__ == '__main__':
     loop = TrainLoop()
-    loop.model.load_model('gen')
-    # loop.train(rec_epoch=0, gen_epoch=1)
+    loop.model.load_model('mi')
+    loop.train(mi_epoch=1, rec_epoch=2, gen_epoch=30)
     met = loop.val(is_test=True)

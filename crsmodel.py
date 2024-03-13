@@ -81,7 +81,7 @@ class SelfAttentionLayer(nn.Module):
         return torch.matmul(attention, x)
 
 
-class SelfAttentionLayer_batch(nn.Module):
+class SelfAttentionLayerBatch(nn.Module):
     def __init__(self, dim, da, alpha=0.2, dropout=0.5):
         super().__init__()
         self.dim = dim
@@ -244,7 +244,7 @@ class TransformerDecoder4KGLayer(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, args, embedding=None, padding_idx=None, reduction=True, n_positions=1024):
+    def __init__(self, args, embedding=None, reduction=True):
         super(TransformerEncoder, self).__init__()
         self.n_heads = args.n_heads
         self.n_layers = args.n_layers
@@ -258,9 +258,8 @@ class TransformerEncoder(nn.Module):
         self.attention_dropout = args.attention_dropout
         self.special_wordIdx = args.special_wordIdx
         self.relu_dropout = args.relu_dropout
-        self.padding_idx = padding_idx
         self.reduction = reduction
-        self.n_positions = n_positions
+        self.max_c_length = args.max_c_length
         self.dim = self.embedding_size
         self.out_dim = self.embedding_size
         assert self.embedding_size % self.n_heads == 0, 'Transformer embedding size must be a multiple of n_heads'
@@ -270,14 +269,14 @@ class TransformerEncoder(nn.Module):
         self.mood_embeddings = nn.Embedding(self.n_mood, self.embedding_size)
         nn.init.normal_(self.mood_embeddings.weight, mean=0, std=self.embedding_size ** -0.5)
         # -------------------------------------------------
-        self.position_embeddings = nn.Embedding(n_positions, self.embedding_size)
-        create_position_codes(n_positions, self.embedding_size, out=self.position_embeddings.weight)
+        self.position_embeddings = nn.Embedding(self.max_c_length, self.embedding_size)
+        create_position_codes(self.max_c_length, self.embedding_size, out=self.position_embeddings.weight)
         self.layers = nn.ModuleList()
         for _ in range(self.n_layers):
             self.layers.append(TransformerEncoderLayer(self.n_heads, self.embedding_size, self.ffn_size, attention_dropout=self.attention_dropout, relu_dropout=self.relu_dropout, dropout=self.p))  # mask1: self.layers.append(TransformerEncoderLayer(self.n_heads, self.embedding_size+128, self.ffn_size+128, attention_dropout=self.attention_dropout, relu_dropout=self.relu_dropout, dropout=self.dropout))
 
     def forward(self, input):
-        mask = input != self.padding_idx  # kg2: mask是参数
+        mask = input != self.special_wordIdx['<pad>']  # kg2: mask是参数
         positions = (mask.cumsum(dim=1, dtype=torch.int64) - 1).clamp_(min=0)
         tensor = self.embeddings(input)  # kg3: tensor=input 没有self.embedding
         last_row = -1
@@ -307,7 +306,7 @@ class TransformerEncoder(nn.Module):
 
 
 class TransformerDecoder4KG(nn.Module):
-    def __init__(self, args, embedding=None, padding_idx=None, n_positions=1024):
+    def __init__(self, args, embedding=None):
         super().__init__()
 
         self.n_heads = args.n_heads
@@ -320,16 +319,15 @@ class TransformerDecoder4KG(nn.Module):
         self.dropout = nn.Dropout(p=self.p)
         self.attention_dropout = args.attention_dropout
         self.relu_dropout = args.relu_dropout
-        self.padding_idx = padding_idx
-        self.n_positions = n_positions
+        self.max_c_length = args.max_c_length
         self.dim = self.embedding_size
         self.out_dim = self.embedding_size
         self.dim = self.embedding_size
         self.out_dim = self.embedding_size
         assert self.embedding_size % self.n_heads == 0, 'Transformer embedding size must be a multiple of n_heads'
         self.embeddings = embedding
-        self.position_embeddings = nn.Embedding(n_positions, self.embedding_size)
-        create_position_codes(n_positions, self.embedding_size, out=self.position_embeddings.weight)
+        self.position_embeddings = nn.Embedding(self.max_c_length, self.embedding_size)
+        create_position_codes(self.max_c_length, self.embedding_size, out=self.position_embeddings.weight)
         self.layers = nn.ModuleList()
         for _ in range(self.n_layers):
             self.layers.append(TransformerDecoder4KGLayer(self.n_heads, self.embedding_size, self.ffn_size, attention_dropout=self.attention_dropout, relu_dropout=self.relu_dropout, dropout=self.p))  # ori1: self.layers.append(TransformerDecoderLayer(self.n_heads, self.embedding_size, self.ffn_size, attention_dropout=self.attention_dropout, relu_dropout=self.relu_dropout, dropout=self.dropout))
@@ -351,12 +349,12 @@ class TransformerDecoder4KG(nn.Module):
 
 
 class CrossModel(nn.Module):
-    def __init__(self, args, pad_idx=0, start_idx=1, end_idx=2):
+    def __init__(self, args, start_idx=1):
         super().__init__()
         self.batch_size = args.batch_size
         self.max_r_length = args.max_r_length
-        self.end_idx = end_idx
-        self.pad_idx = pad_idx
+        self.special_wordIdx = args.special_wordIdx
+        self.crs_data_path=args.crs_data_path
         self.device = args.device
         self.n_concept = args.n_concept
         self.n_entity = args.n_entity
@@ -365,10 +363,9 @@ class CrossModel(nn.Module):
         self.n_relation = args.n_relation
         self.register_buffer('START', torch.LongTensor([start_idx]))
         self.dbpedia_subkg = args.dbpedia_subkg
-        self.mask4key = torch.Tensor(np.load('data/mask4key.npy')).to(self.device)
-        self.mask4movie = torch.Tensor(np.load('data/mask4movie.npy')).to(self.device)
+        self.mask4key = torch.Tensor(np.load(self.crs_data_path+'/mask4key.npy')).to(self.device)
+        self.mask4movie = torch.Tensor(np.load(self.crs_data_path+'/mask4movie.npy')).to(self.device)
         self.mask4 = self.mask4key + self.mask4movie
-        self.n_positions = 1024
         self.hidden_dim = args.hidden_dim
         self.embedding_size = args.embedding_size
         # 生成部分db_attn，encoder_states_kg部分的参数
@@ -381,8 +378,8 @@ class CrossModel(nn.Module):
         self.concept_embeddings = nn.Embedding(args.n_concept + 1, self.hidden_dim)
         nn.init.normal_(self.concept_embeddings.weight, mean=0, std=self.hidden_dim ** -0.5)
         nn.init.constant_(self.concept_embeddings.weight[0], 0)
-        self.con_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
-        self.user_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
+        self.con_graph_attn = SelfAttentionLayerBatch(self.hidden_dim, self.hidden_dim)
+        self.user_graph_attn = SelfAttentionLayerBatch(self.hidden_dim, self.hidden_dim)
         self.db_graph_attn = SelfAttentionLayer(self.hidden_dim, self.hidden_dim)
         # mi_loss部分的参数
         self.club_mi = MyCLUB(self.hidden_dim, self.hidden_dim, self.hidden_dim)
@@ -392,16 +389,16 @@ class CrossModel(nn.Module):
         self.gate2_fc = nn.Linear(self.hidden_dim, 1)
         self.criterion = nn.CrossEntropyLoss(reduce=False)
         # sum_embeddings
-        self.embeddings = nn.Embedding(self.vocab_size, self.embedding_size, self.pad_idx)
-        self.embeddings.weight.data.copy_(torch.from_numpy(np.load('data/word2vec_redial.npy')))
+        self.embeddings = nn.Embedding(self.vocab_size, self.embedding_size, self.special_wordIdx['<pad>'])
+        self.embeddings.weight.data.copy_(torch.from_numpy(np.load(self.crs_data_path+'/word2vec_redial.npy')))
         # rec2_loss部分的参数
-        self.encoder = TransformerEncoder(args, self.embeddings, self.pad_idx, reduction=False, n_positions=self.n_positions)
+        self.encoder = TransformerEncoder(args, self.embeddings, reduction=False)
         # gen_loss部分的参数
         self.con_graph_fc = nn.Linear(self.hidden_dim, self.embedding_size)
         self.db_graph_fc = nn.Linear(self.hidden_dim, self.embedding_size)
         self.con_graph_attn_fc = nn.Linear(self.hidden_dim, self.embedding_size)
         self.db_graph_attn_fc = nn.Linear(self.hidden_dim, self.embedding_size)
-        self.decoder = TransformerDecoder4KG(args, self.embeddings, self.pad_idx, n_positions=self.n_positions)
+        self.decoder = TransformerDecoder4KG(args, self.embeddings)
         self.decoder_graph_latent_fc = nn.Linear(self.embedding_size * 2 + self.embedding_size, self.embedding_size)
         self.decoder_graph_latent_fc_gen_fc = nn.Linear(self.embedding_size, self.vocab_size)
         self.graph_rec_output = nn.Linear(self.hidden_dim, self.n_entity)
@@ -474,7 +471,7 @@ class CrossModel(nn.Module):
                 _, preds = sum_gen_scores.max(dim=-1)
                 logits.append(sum_gen_scores)
                 predict_vector = torch.cat([predict_vector, preds], dim=1)
-                all_finished = ((predict_vector == self.end_idx).sum(dim=1) > 0).sum().item() == self.batch_size
+                all_finished = ((predict_vector == self.special_wordIdx['<eos>']).sum(dim=1) > 0).sum().item() == self.batch_size
                 if all_finished:
                     break
             logits = torch.cat(logits, 1)
@@ -492,10 +489,10 @@ class CrossModel(nn.Module):
         return torch.tensor(edge_list, dtype=torch.long)
 
     def concept_edge_list4GCN(self):
-        node2index = json.load(open('data/key2index_3rd.json', encoding='utf-8'))
-        f = open('data/conceptnet_edges2nd.txt', encoding='utf-8')
+        node2index = json.load(open(self.crs_data_path+'/key2index_3rd.json', encoding='utf-8'))
+        f = open(self.crs_data_path+'/conceptnet_edges2nd.txt', encoding='utf-8')
         edges = set()
-        stopwords = set([word.strip() for word in open('data/stopwords.txt', encoding='utf-8')])
+        stopwords = set([word.strip() for word in open(self.crs_data_path+'/stopwords.txt', encoding='utf-8')])
         for line in f:
             lines = line.strip().split('\t')
             entity0 = node2index[lines[1].split('/')[0]]
@@ -508,27 +505,20 @@ class CrossModel(nn.Module):
         return torch.LongTensor(edge_set).to(self.device)
 
     def freeze_kg(self, freezeKG):
+        params = [self.dbpedia_RGCN.parameters(), self.concept_GCN.parameters(), self.concept_embeddings.parameters(), self.con_graph_attn.parameters(), self.db_graph_attn.parameters(), self.db_graph_attn.parameters(), self.user_graph_attn.parameters(), self.club_mi.parameters(), self.user_fc.parameters(), self.gate1_fc.parameters(), self.gate2_fc.parameters()]
         if freezeKG:
-            params = [self.dbpedia_RGCN.parameters(), self.concept_GCN.parameters(), self.concept_embeddings.parameters(), self.con_graph_attn.parameters(), self.db_graph_attn.parameters(), self.db_graph_attn.parameters(), self.user_graph_attn.parameters(), self.user_db_con_fc.parameters(), self.graph_rec_output.parameters()]
             for param in params:
                 for pa in param:
                     pa.requires_grad = False
             print(f"Freeze parameters in the model")
         else:
-            params = [self.dbpedia_RGCN.parameters(), self.concept_GCN.parameters(), self.concept_embeddings.parameters(), self.con_graph_attn.parameters(), self.db_graph_attn.parameters(), self.db_graph_attn.parameters(), self.user_graph_attn.parameters(), self.user_db_con_fc.parameters(), self.graph_rec_output.parameters()]
             for param in params:
                 for pa in param:
                     pa.requires_grad = True
             print(f"UnFreeze parameters in the model")
 
     def save_model(self, tag):
-        if tag == "rec":
-            torch.save(self.state_dict(), 'rec_net_parameter.pkl')
-        else:
-            torch.save(self.state_dict(), 'gen_net_parameter.pkl')
+        torch.save(self.state_dict(), tag+'_net_parameter.pkl')
 
     def load_model(self, tag):
-        if tag == "rec":
-            self.load_state_dict(torch.load('rec_net_parameter.pkl'), strict=False)
-        else:
-            self.load_state_dict(torch.load('gen_net_parameter.pkl'), strict=False)
+        self.load_state_dict(torch.load(tag+'_net_parameter.pkl'), strict=False)
