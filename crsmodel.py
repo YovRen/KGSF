@@ -356,7 +356,6 @@ class CrossModel(nn.Module):
         self.n_user = args.n_user
         self.n_relation = args.n_relation
         self.register_buffer('START', torch.LongTensor([start_idx]))
-        self.concept_padding = 0
         self.dbpedia_subkg = args.dbpedia_subkg
         self.mask4key = torch.Tensor(np.load('data/mask4key.npy')).to(self.device)
         self.mask4movie = torch.Tensor(np.load('data/mask4movie.npy')).to(self.device)
@@ -377,7 +376,7 @@ class CrossModel(nn.Module):
         self.con_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
         self.user_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
         self.db_graph_attn = SelfAttentionLayer(self.hidden_dim, self.hidden_dim)
-        # mutual_loss部分的参数
+        # mi_loss部分的参数
         self.club_mi = MyCLUB(self.hidden_dim, self.hidden_dim, self.hidden_dim)
         # rec_loss部分的参数
         self.user_fc = nn.Linear(self.hidden_dim * 3, self.hidden_dim)
@@ -417,17 +416,15 @@ class CrossModel(nn.Module):
             dbpedias_emb_list.append(db_graph_attn_emb)
             db_con_mask.append(torch.ones([1]))
         db_graph_attn_emb = torch.stack(dbpedias_emb_list)
-        db_con_mask = torch.stack(db_con_mask)
         con_graph_emb = con_nodes_features[concept_mask]
-        con_graph_attn_emb, attention = self.con_graph_attn(con_graph_emb, (concept_mask == self.concept_padding).to(self.device))
-        user_graph_emb = con_nodes_features[user_mentioned]
+        con_graph_attn_emb, attention = self.con_graph_attn(con_graph_emb, (concept_mask == 0).to(self.device))
+        user_graph_emb = user_nodes_features[user_mentioned]
         user_graph_attn_emb, attention = self.user_graph_attn(user_graph_emb, (user_mentioned == 0).to(self.device))
         # info_loss
-        mutual_loss = self.club_mi(user_graph_attn_emb, db_graph_attn_emb, con_graph_attn_emb)
+        mi_loss = self.club_mi(user_graph_attn_emb, db_graph_attn_emb, con_graph_attn_emb)
         # 通过user_emb和db_nodes_features计算rec_scores，对比labels得到rec_loss
         uc_gate1 = F.sigmoid(self.gate1_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
         uc_gate2 = F.sigmoid(self.gate2_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
-
         user_emb = uc_gate1 * db_graph_attn_emb +uc_gate2 * con_graph_attn_emb+(1-uc_gate1-uc_gate2)*user_graph_attn_emb
         rec_scores = F.linear(user_emb, db_nodes_features, self.graph_rec_output.bias)
         rec_loss = torch.sum(self.criterion(rec_scores, labels.to(self.device)) * rec.float().to(self.device))
@@ -435,7 +432,7 @@ class CrossModel(nn.Module):
         # generation---------------------------------------------------------------------------------------------------
         con_nodes_features4gen = con_nodes_features
         con_emb4gen = con_nodes_features4gen[concept_mask]
-        con_mask4gen = concept_mask != self.concept_padding
+        con_mask4gen = concept_mask != 0
         kg_encoding = (self.con_graph_fc(con_emb4gen), con_mask4gen.to(self.device))
         db_emb4gen = db_nodes_features[dbpedia_mentioned]  # batch*50*dim
         db_mask4gen = dbpedia_mentioned != 0
@@ -476,7 +473,7 @@ class CrossModel(nn.Module):
             scores = logits
             preds = predict_vector
             gen_loss = None
-        return scores, preds, rec_scores, rec_loss, gen_loss, mutual_loss, 0
+        return scores, preds, rec_scores, rec_loss, gen_loss, mi_loss
 
     def _edge_list(self):
         edge_list = []

@@ -48,7 +48,7 @@ class CRSDataset(Dataset):
         self.key2index = json.load(open('data/key2index_3rd.json', encoding='utf-8'))
         self.stopwords = set([word.strip() for word in open('data/stopwords.txt', encoding='utf-8')])
         self.datapre = self.data_process(is_finetune=False)  # self.co_occurance_ext(self.cases)  # exit()  # self.datapre = self.datapre[:len(self.datapre) // 5]
-        self.datapre = self.datapre[:len(self.datapre) // 5]
+        # self.datapre = self.datapre[:len(self.datapre) // 5]
 
     def _context_reformulate(self, messages, movieMentions, respondentQuestions, initiatorQuestions, initiatorWorkerId, respondentWorkerId):
         """
@@ -294,7 +294,7 @@ class CRSDataset(Dataset):
             if db != 0:
                 dbpedia_vector[db] = 1
 
-        user_mentioned = np.zeros(60)
+        user_mentioned = np.zeros(100)
         user_vector = np.zeros(self.n_user)
         point = 0
         for us in users:
