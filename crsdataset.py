@@ -287,15 +287,11 @@ class CRSDataset(Dataset):
                 rating = respondentQuestions[movieId]
                 if self.id2entity[int(movieId)] is not None:
                     dbpediaId = self.entity2entityId[self.id2entity[int(movieId)]]
-                    assert self.userId2userIdx[str(initiatorWorkerId)] + self.n_entity < self.n_entity + 1075
-                    assert dbpediaId < self.n_entity + 1075
                     subkg[self.userId2userIdx[str(respondentWorkerId)] + self.n_entity].append([dbpediaId, rating["suggested"] * 9 + rating["seen"] * 3 + rating["liked"]])
             for movieId in initiatorQuestions:
                 rating = initiatorQuestions[movieId]
                 if self.id2entity[int(movieId)] is not None:
                     dbpediaId = self.entity2entityId[self.id2entity[int(movieId)]]
-                    assert self.userId2userIdx[str(initiatorWorkerId)] + self.n_entity < self.n_entity + 1075
-                    assert dbpediaId < self.n_entity + 1075
                     subkg[self.userId2userIdx[str(initiatorWorkerId)] + self.n_entity].append([dbpediaId, rating["suggested"] * 9 + rating["seen"] * 3 + rating["liked"]])
 
         json.dump(subkg, open(self.crs_data_path + '/dbpedia_subkg.jsonl', 'w', encoding='utf-8'), ensure_ascii=False)
@@ -327,7 +323,7 @@ class CRSDataset(Dataset):
         for us in users:
             if us != 0:
                 user_vector[self.userId2userIdx[str(us)]] = 1
-                user_mentioned[point] = us
+                user_mentioned[point] = self.userId2userIdx[str(us)]
                 point += 1
         return torch.tensor(context_vector, dtype=torch.long), torch.tensor(response_vector, dtype=torch.long), entity_vec, torch.tensor(dbpedia_mentioned, dtype=torch.long), torch.tensor(user_mentioned, dtype=torch.long), movie, torch.tensor(concept_mask, dtype=torch.long), np.array(dbpedia_mask), concept_vector, dbpedia_vector, user_vector, rec
 

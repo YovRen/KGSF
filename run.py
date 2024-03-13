@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore")
 class TrainLoop:
     def __init__(self):
         self.crs_data_path = "data"
-        self.batch_size = 128
+        self.batch_size = 256
         self.learningrate = 0.001
         self.gradient_clip = 0.1
         self.optimizer = 'adam'
@@ -47,12 +47,12 @@ class TrainLoop:
         self.text_dict = pkl.load(open('data/text_dict.pkl', 'rb'))
         self.userId2userIdx = json.load(open(self.crs_data_path + '/redial_userId2userIdx.jsonl', encoding='utf-8'))
         self.dbpedia_subkg = json.load(open(self.crs_data_path + '/dbpedia_subkg.jsonl', encoding='utf-8'))
-        self.train_dataset=CRSDataset('toy_train', self)
-        self.test_dataset = CRSDataset('toy_test', self)
-        self.valid_dataset = CRSDataset('toy_valid', self)
-        # self.train_dataset = CRSDataset('train', self)
-        # self.test_dataset = CRSDataset('test', self)
-        # self.valid_dataset = CRSDataset('valid', self)
+        # self.train_dataset = CRSDataset('toy_train', self)
+        # self.test_dataset = CRSDataset('toy_test', self)
+        # self.valid_dataset = CRSDataset('toy_valid', self)
+        self.train_dataset = CRSDataset('train', self)
+        self.test_dataset = CRSDataset('test', self)
+        self.valid_dataset = CRSDataset('valid', self)
         self.train_dataloader = torch.utils.data.DataLoader(dataset=self.train_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.test_dataloader = torch.utils.data.DataLoader(dataset=self.test_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.valid_dataloader = torch.utils.data.DataLoader(dataset=self.valid_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
@@ -64,7 +64,7 @@ class TrainLoop:
         self.model = CrossModel(self).to(self.device)
         self.optimizer = {k.lower(): v for k, v in torch.optim.__dict__.items() if not k.startswith('__') and k[0].isupper()}[self.optimizer]([p for p in self.model.parameters() if p.requires_grad], lr=self.learningrate, amsgrad=True, betas=(0.9, 0.999))
 
-    def train(self, rec_epoch, gen_epoch):
+    def train(self, mi_epoch, rec_epoch, gen_epoch):
         losses = []
         best_val = 10000
         for i in range(rec_epoch + gen_epoch):
@@ -77,7 +77,9 @@ class TrainLoop:
                     seed_sets.append(seed_set)
                 self.optimizer.zero_grad()
                 _, _, _, rec_loss, gen_loss, mi_loss = self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device), user_vector.to(self.device), dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
-                if i < rec_epoch:
+                if i < mi_epoch:
+                    joint_loss = rec_loss + 0.025 * mi_loss
+                elif i < mi_epoch + rec_epoch:
                     joint_loss = rec_loss
                 else:
                     joint_loss = gen_loss
@@ -86,30 +88,38 @@ class TrainLoop:
                 self.optimizer.step()
                 if self.gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
-                losses.append([gen_loss, rec_loss, mi_loss, joint_loss])
+                losses.append([mi_loss, rec_loss, gen_loss, joint_loss])
                 if (num + 1) % (512 / self.batch_size) == 0:
-                    print('gen_loss is %f' % (sum([l[0] for l in losses]) / len(losses)))
+                    print('\nEpoch %d\t[%d,%d,%d]-------------' % (i, mi_epoch, rec_epoch, gen_epoch))
+                    print('mi_loss is %f' % (sum([l[0] for l in losses]) / len(losses)))
                     print('rec_loss is %f' % (sum([l[1] for l in losses]) / len(losses)))
-                    print('mi_loss is %f' % (sum([l[2] for l in losses]) / len(losses)))
+                    print('gen_loss is %f' % (sum([l[2] for l in losses]) / len(losses)))
                     print('joint_loss is %f' % (sum([l[3] for l in losses]) / len(losses)))
                     losses = []
             output_metrics_rec, output_metrics_gen = self.val()
-            if i < rec_epoch:
-                if best_val < output_metrics_rec["rec_loss"]:
+            if (i < mi_epoch) and (mi_epoch != 0):
+                self.model.save_model('mi')
+                print("mutual_information model saved once------------------------------------------------")
+            elif (i == mi_epoch) and (rec_epoch != 0):
+                best_val = output_metrics_gen["recall@50"]
+                self.model.save_model('rec')
+                print("recommendation model saved once------------------------------------------------")
+            elif (i < mi_epoch + rec_epoch) and (rec_epoch != 0):
+                if best_val > output_metrics_gen["recall@50"]:
                     break
                 else:
-                    best_val = output_metrics_rec["rec_loss"]
+                    best_val = output_metrics_gen["recall@50"]
                     self.model.save_model('rec')
-                    print("recommendation model saved once------------------------------------------------")
-            elif i == rec_epoch:
-                best_val = output_metrics_gen["gen_loss"]
+                print("recommendation model saved once------------------------------------------------")
+            elif (i == mi_epoch + rec_epoch) and (gen_epoch != 0):
+                best_val = output_metrics_gen["dist4"]
                 self.model.save_model('gen')
                 print("generator model saved once------------------------------------------------")
-            else:
-                if best_val < output_metrics_gen["gen_loss"]:
-                    break
+            elif gen_epoch != 0:
+                if best_val > output_metrics_gen["dist4"]:
+                    continue
                 else:
-                    best_val = output_metrics_gen["gen_loss"]
+                    best_val = output_metrics_gen["dist4"]
                     self.model.save_model('gen')
                     print("generator model saved once------------------------------------------------")
 
@@ -207,6 +217,5 @@ class TrainLoop:
 
 if __name__ == '__main__':
     loop = TrainLoop()
-    loop.model.load_model('gen')
-    # loop.train(rec_epoch=0, gen_epoch=1)
+    loop.train(mi_epoch=3, rec_epoch=3, gen_epoch=10)
     met = loop.val(is_test=True)

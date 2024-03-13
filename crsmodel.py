@@ -81,7 +81,7 @@ class SelfAttentionLayer(nn.Module):
         return torch.matmul(attention, x)
 
 
-class SelfAttentionLayer_batch(nn.Module):
+class SelfAttentionLayerBatch(nn.Module):
     def __init__(self, dim, da, alpha=0.2, dropout=0.5):
         super().__init__()
         self.dim = dim
@@ -381,8 +381,8 @@ class CrossModel(nn.Module):
         self.concept_embeddings = nn.Embedding(args.n_concept + 1, self.hidden_dim)
         nn.init.normal_(self.concept_embeddings.weight, mean=0, std=self.hidden_dim ** -0.5)
         nn.init.constant_(self.concept_embeddings.weight[0], 0)
-        self.con_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
-        self.user_graph_attn = SelfAttentionLayer_batch(self.hidden_dim, self.hidden_dim)
+        self.con_graph_attn = SelfAttentionLayerBatch(self.hidden_dim, self.hidden_dim)
+        self.user_graph_attn = SelfAttentionLayerBatch(self.hidden_dim, self.hidden_dim)
         self.db_graph_attn = SelfAttentionLayer(self.hidden_dim, self.hidden_dim)
         # mi_loss部分的参数
         self.club_mi = MyCLUB(self.hidden_dim, self.hidden_dim, self.hidden_dim)
@@ -435,7 +435,7 @@ class CrossModel(nn.Module):
         uc_gate2 = F.sigmoid(self.gate2_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
         user_emb = uc_gate1 * db_graph_attn_emb + uc_gate2 * con_graph_attn_emb + (1 - uc_gate1 - uc_gate2) * user_graph_attn_emb
         rec_scores = F.linear(user_emb, db_nodes_features, self.graph_rec_output.bias)
-        rec_loss = torch.sum(self.criterion(rec_scores, labels.to(self.device)) * rec.float().to(self.device))
+        rec_loss = torch.mean(self.criterion(rec_scores, labels.to(self.device)) * rec.float().to(self.device))
         # 计算gen_scores和preds--------可以把历史记录的movie_fc加上--------------------|##|Aab******#|Bc******#|Ac******#|Bc********#|-------------
         # generation---------------------------------------------------------------------------------------------------
         con_nodes_features4gen = con_nodes_features
@@ -522,13 +522,7 @@ class CrossModel(nn.Module):
             print(f"UnFreeze parameters in the model")
 
     def save_model(self, tag):
-        if tag == "rec":
-            torch.save(self.state_dict(), 'rec_net_parameter.pkl')
-        else:
-            torch.save(self.state_dict(), 'gen_net_parameter.pkl')
+        torch.save(self.state_dict(), tag + '_net_parameter.pkl')
 
     def load_model(self, tag):
-        if tag == "rec":
-            self.load_state_dict(torch.load('rec_net_parameter.pkl'), strict=False)
-        else:
-            self.load_state_dict(torch.load('gen_net_parameter.pkl'), strict=False)
+        self.load_state_dict(torch.load(tag + '_net_parameter.pkl'), strict=False)
