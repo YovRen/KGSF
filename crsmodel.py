@@ -1,31 +1,21 @@
 import json
 import math
 import numpy as np
-import pickle as pkl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections import defaultdict
 from torch_geometric.nn.conv.rgcn_conv import RGCNConv
 from torch_geometric.nn.conv.gcn_conv import GCNConv
 
 NEAR_INF = 1e20
 NEAR_INF_FP16 = 65504
 
+
 class MyCLUB(nn.Module):
     def __init__(self, x_dim, y_dim, hidden_size):
         super(MyCLUB, self).__init__()
-        self.p_mu = nn.Sequential(
-            nn.Linear(x_dim, hidden_size//2),
-            nn.ReLU(),
-            nn.Linear(hidden_size//2, y_dim)
-        )
-        self.p_logvar = nn.Sequential(
-            nn.Linear(x_dim, hidden_size//2),
-            nn.ReLU(),
-            nn.Linear(hidden_size//2, y_dim),
-            nn.Tanh()
-        )
+        self.p_mu = nn.Sequential(nn.Linear(x_dim, hidden_size // 2), nn.ReLU(), nn.Linear(hidden_size // 2, y_dim))
+        self.p_logvar = nn.Sequential(nn.Linear(x_dim, hidden_size // 2), nn.ReLU(), nn.Linear(hidden_size // 2, y_dim), nn.Tanh())
         self.relu = nn.ReLU()
 
     def get_mu_logvar(self, x_samples):
@@ -37,7 +27,7 @@ class MyCLUB(nn.Module):
         mu, logvar = self.get_mu_logvar(x_samples)
 
         # Log-likelihood of positive sample pairs
-        positive = - ((mu - y_samples)**2 + (mu - z_samples)**2) / (2. * logvar.exp())
+        positive = - ((mu - y_samples) ** 2 + (mu - z_samples) ** 2) / (2. * logvar.exp())
 
         # Constructing pairs for negative log-likelihood
         prediction_1 = mu.unsqueeze(1)  # shape [nsample,1,dim]
@@ -45,14 +35,14 @@ class MyCLUB(nn.Module):
         z_samples_1 = z_samples.unsqueeze(0)  # shape [1,nsample,dim]
 
         # Log-likelihood of negative sample pairs
-        negative = - ((y_samples_1 - prediction_1)**2 + (z_samples_1 - prediction_1)**2).mean(dim=1) / (2. * logvar.exp())
+        negative = - ((y_samples_1 - prediction_1) ** 2 + (z_samples_1 - prediction_1) ** 2).mean(dim=1) / (2. * logvar.exp())
 
         # CLUB estimation
         return (self.relu(positive.sum(dim=-1) - negative.sum(dim=-1))).mean()
 
     def loglikeli(self, x_samples, y_samples, z_samples):
         mu, logvar = self.get_mu_logvar(x_samples)
-        return (-(mu - y_samples)**2 / logvar.exp() - (mu - z_samples)**2 / logvar.exp() - logvar).sum(dim=1).mean(dim=0)
+        return (-(mu - y_samples) ** 2 / logvar.exp() - (mu - z_samples) ** 2 / logvar.exp() - logvar).sum(dim=1).mean(dim=0)
 
     def learning_loss(self, x_samples, y_samples, z_samples):
         return -self.loglikeli(x_samples, y_samples, z_samples)
@@ -254,17 +244,19 @@ class TransformerDecoder4KGLayer(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, args, dictionary, embedding=None, padding_idx=None, reduction=True, n_positions=1024):
+    def __init__(self, args, embedding=None, padding_idx=None, reduction=True, n_positions=1024):
         super(TransformerEncoder, self).__init__()
         self.n_heads = args.n_heads
         self.n_layers = args.n_layers
+        self.n_mood = args.n_mood
         self.embedding_size = args.embedding_size
         self.ffn_size = args.ffn_size
-        self.vocabulary_size = len(dictionary) + 4
-        self.embedding = embedding
+        self.vocab_size = args.vocab_size
+        self.embeddings = embedding
         self.p = args.dropout
         self.dropout = nn.Dropout(p=self.p)
         self.attention_dropout = args.attention_dropout
+        self.special_wordIdx = args.special_wordIdx
         self.relu_dropout = args.relu_dropout
         self.padding_idx = padding_idx
         self.reduction = reduction
@@ -272,7 +264,12 @@ class TransformerEncoder(nn.Module):
         self.dim = self.embedding_size
         self.out_dim = self.embedding_size
         assert self.embedding_size % self.n_heads == 0, 'Transformer embedding size must be a multiple of n_heads'
-        self.embeddings = embedding
+        # mood_attn部分------------------------------------
+        self.mood_attn = SelfAttentionLayer(self.embedding_size, self.embedding_size)
+        self.mood_attn_fc = nn.Linear(self.embedding_size, self.n_mood)
+        self.mood_embeddings = nn.Embedding(self.n_mood, self.embedding_size)
+        nn.init.normal_(self.mood_embeddings.weight, mean=0, std=self.embedding_size ** -0.5)
+        # -------------------------------------------------
         self.position_embeddings = nn.Embedding(n_positions, self.embedding_size)
         create_position_codes(n_positions, self.embedding_size, out=self.position_embeddings.weight)
         self.layers = nn.ModuleList()
@@ -283,6 +280,16 @@ class TransformerEncoder(nn.Module):
         mask = input != self.padding_idx  # kg2: mask是参数
         positions = (mask.cumsum(dim=1, dtype=torch.int64) - 1).clamp_(min=0)
         tensor = self.embeddings(input)  # kg3: tensor=input 没有self.embedding
+        last_row = -1
+        last_col = -1
+        for indice in torch.nonzero(input == self.special_wordIdx['<mood>']):
+            if indice[0] == last_row:
+                tensor[[indice[0], indice[1]]] = self.mood_embeddings(torch.argmax(self.mood_attn_fc(self.mood_attn(tensor[indice[0], last_col + 2:indice[1]]))))
+                last_col = indice[1]
+            else:
+                tensor[[indice[0], indice[1]]] = self.mood_embeddings(torch.argmax(self.mood_attn_fc(self.mood_attn(tensor[indice[0], 0:indice[1]]))))
+                last_row = indice[0]
+                last_col = indice[1]
         tensor = tensor * np.sqrt(self.dim)
         tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
         # mask2: tensor=torch.cat([tensor,m_emb.unsqueeze(1).repeat(1,tensor.size()[1],1)],dim=-1)
@@ -300,14 +307,14 @@ class TransformerEncoder(nn.Module):
 
 
 class TransformerDecoder4KG(nn.Module):
-    def __init__(self, args, dictionary, embedding=None, padding_idx=None, n_positions=1024):
+    def __init__(self, args, embedding=None, padding_idx=None, n_positions=1024):
         super().__init__()
 
         self.n_heads = args.n_heads
         self.n_layers = args.n_layers
         self.embedding_size = args.embedding_size
         self.ffn_size = args.ffn_size
-        self.vocabulary_size = len(dictionary) + 4
+        self.vocab_size = args.vocab_size
         self.embedding = embedding
         self.p = args.dropout
         self.dropout = nn.Dropout(p=self.p)
@@ -344,7 +351,7 @@ class TransformerDecoder4KG(nn.Module):
 
 
 class CrossModel(nn.Module):
-    def __init__(self, args, dictionary, pad_idx=0, start_idx=1, end_idx=2):
+    def __init__(self, args, pad_idx=0, start_idx=1, end_idx=2):
         super().__init__()
         self.batch_size = args.batch_size
         self.max_r_length = args.max_r_length
@@ -354,6 +361,7 @@ class CrossModel(nn.Module):
         self.n_concept = args.n_concept
         self.n_entity = args.n_entity
         self.n_user = args.n_user
+        self.vocab_size = args.vocab_size
         self.n_relation = args.n_relation
         self.register_buffer('START', torch.LongTensor([start_idx]))
         self.dbpedia_subkg = args.dbpedia_subkg
@@ -384,21 +392,21 @@ class CrossModel(nn.Module):
         self.gate2_fc = nn.Linear(self.hidden_dim, 1)
         self.criterion = nn.CrossEntropyLoss(reduce=False)
         # sum_embeddings
-        self.embeddings = nn.Embedding(len(dictionary) + 4, self.embedding_size, self.pad_idx)
+        self.embeddings = nn.Embedding(self.vocab_size, self.embedding_size, self.pad_idx)
         self.embeddings.weight.data.copy_(torch.from_numpy(np.load('data/word2vec_redial.npy')))
         # rec2_loss部分的参数
-        self.encoder = TransformerEncoder(args, dictionary, self.embeddings, self.pad_idx, reduction=False, n_positions=self.n_positions)
+        self.encoder = TransformerEncoder(args, self.embeddings, self.pad_idx, reduction=False, n_positions=self.n_positions)
         # gen_loss部分的参数
         self.con_graph_fc = nn.Linear(self.hidden_dim, self.embedding_size)
         self.db_graph_fc = nn.Linear(self.hidden_dim, self.embedding_size)
         self.con_graph_attn_fc = nn.Linear(self.hidden_dim, self.embedding_size)
         self.db_graph_attn_fc = nn.Linear(self.hidden_dim, self.embedding_size)
-        self.decoder = TransformerDecoder4KG(args, dictionary, self.embeddings, self.pad_idx, n_positions=self.n_positions)
+        self.decoder = TransformerDecoder4KG(args, self.embeddings, self.pad_idx, n_positions=self.n_positions)
         self.decoder_graph_latent_fc = nn.Linear(self.embedding_size * 2 + self.embedding_size, self.embedding_size)
-        self.decoder_graph_latent_fc_gen_fc = nn.Linear(self.embedding_size, len(dictionary) + 4)
+        self.decoder_graph_latent_fc_gen_fc = nn.Linear(self.embedding_size, self.vocab_size)
         self.graph_rec_output = nn.Linear(self.hidden_dim, self.n_entity)
 
-    def forward(self, context_vector, response_vector, concept_mask, db_mask, seed_sets, labels, concept_vector, dbpedia_vector, user_vector,  dbpedia_mentioned, user_mentioned, rec):
+    def forward(self, context_vector, response_vector, concept_mask, db_mask, seed_sets, labels, concept_vector, dbpedia_vector, user_vector, dbpedia_mentioned, user_mentioned, rec):
         dbpedia_nodes_features = self.dbpedia_RGCN(None, self.db_edge_idx, self.db_edge_type)
         db_nodes_features = dbpedia_nodes_features[:self.n_entity]
         user_nodes_features = dbpedia_nodes_features[self.n_entity:]
@@ -425,7 +433,7 @@ class CrossModel(nn.Module):
         # 通过user_emb和db_nodes_features计算rec_scores，对比labels得到rec_loss
         uc_gate1 = F.sigmoid(self.gate1_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
         uc_gate2 = F.sigmoid(self.gate2_fc(self.user_fc(torch.cat([con_graph_attn_emb, db_graph_attn_emb, user_graph_attn_emb], dim=-1))))
-        user_emb = uc_gate1 * db_graph_attn_emb +uc_gate2 * con_graph_attn_emb+(1-uc_gate1-uc_gate2)*user_graph_attn_emb
+        user_emb = uc_gate1 * db_graph_attn_emb + uc_gate2 * con_graph_attn_emb + (1 - uc_gate1 - uc_gate2) * user_graph_attn_emb
         rec_scores = F.linear(user_emb, db_nodes_features, self.graph_rec_output.bias)
         rec_loss = torch.sum(self.criterion(rec_scores, labels.to(self.device)) * rec.float().to(self.device))
         # 计算gen_scores和preds--------可以把历史记录的movie_fc加上--------------------|##|Aab******#|Bc******#|Ac******#|Bc********#|-------------

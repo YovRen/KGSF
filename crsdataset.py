@@ -25,13 +25,14 @@ class CRSDataset(Dataset):
         self.n_user = args.n_user
         self.entity2entityId = args.entity2entityId
         self.userId2userIdx = args.userId2userIdx
+        self.special_wordIdx = args.special_wordIdx
         self.id2entity = args.id2entity
         self.text_dict = args.text_dict
         self.entity_max = len(self.entity2entityId)
+        self.concept_min = 0
         # self.prepare_dbpedia_subkg()
         f = open(self.crs_data_path + '/' + mode + '_data.jsonl', encoding='utf-8')
         self.cases = []
-        self.corpus = []
         for case in tqdm(f):
             lines = json.loads(case.strip())
             initiatorWorkerId = lines["initiatorWorkerId"]
@@ -43,11 +44,12 @@ class CRSDataset(Dataset):
             cases = self._context_reformulate(messages, movieMentions, respondentQuestions, initiatorQuestions, initiatorWorkerId, respondentWorkerId)
             self.cases.extend(cases)
 
-        # self.prepare_word2vec()
         self.word2index = json.load(open('data/word2index_redial.json', encoding='utf-8'))
         self.key2index = json.load(open('data/key2index_3rd.json', encoding='utf-8'))
         self.stopwords = set([word.strip() for word in open('data/stopwords.txt', encoding='utf-8')])
-        self.datapre = self.data_process(is_finetune=False)  # self.co_occurance_ext(self.cases)  # exit()  # self.datapre = self.datapre[:len(self.datapre) // 5]
+        # self.prepare_word2vec()
+        self.datapre = self.data_process(is_finetune=False)
+        # self.co_occurance_ext(self.cases)  # exit()
         # self.datapre = self.datapre[:len(self.datapre) // 5]
 
     def _context_reformulate(self, messages, movieMentions, respondentQuestions, initiatorQuestions, initiatorWorkerId, respondentWorkerId):
@@ -105,7 +107,6 @@ class CRSDataset(Dataset):
         entities = []
         users = []
         for message_dict in message_list:
-            self.corpus.append(message_dict['text'])
             if message_dict['user'] == respondentWorkerId and len(contexts) > 0:
                 response = message_dict['text']
                 if len(message_dict['movie']) != 0:
@@ -124,10 +125,39 @@ class CRSDataset(Dataset):
         """
         准备 Word2Vec 模型，对语料库进行处理并生成词向量
         """
-        model = gensim.models.word2vec.Word2Vec(self.corpus, size=300, min_count=1)
-        word2index = {word: i + 4 for i, word in enumerate(model.wv.index2word)}
-        word2embedding = [[0] * 300] * 4 + [model[word] for word in word2index] + [[0] * 300]
-        word2index['_split_'] = len(word2index) + 4
+        corpus = []
+        for mode in ['train', 'test', 'valid']:
+            f = open(self.crs_data_path + '/' + mode + '_data.jsonl', encoding='utf-8')
+            for case in tqdm(f):
+                lines = json.loads(case.strip())
+                messages = lines['messages']
+                for message in messages:
+                    token_text_ori = nltk.word_tokenize(message['text'])
+                    token_text = []
+                    num = 0
+                    # 对分词结果中的 @ abc 合成一个单词，得到 token_text
+                    while num < len(token_text_ori):
+                        if token_text_ori[num] == '@' and num + 1 < len(token_text_ori):
+                            token_text.append(token_text_ori[num] + token_text_ori[num + 1])
+                            num += 2
+                        else:
+                            token_text.append(token_text_ori[num])
+                            num += 1
+                    corpus.append(token_text)
+        model = gensim.models.word2vec.Word2Vec(corpus, vector_size=300, min_count=1)
+        word2index = {word: self.special_wordIdx[word] for word in self.special_wordIdx}
+        new_word2index = {word: i + len(self.special_wordIdx) for i, word in enumerate(model.wv.index_to_key)}
+        word2index.update(new_word2index)
+        word2embedding = [[0] * 300] * len(self.special_wordIdx) + [model.wv[word] for word in new_word2index]
+        mask4key = np.zeros(len(word2index))
+        mask4movie = np.zeros(len(word2index))
+        for i, word in enumerate(word2index):
+            if word.lower() in self.key2index:
+                mask4key[i] = 1
+            if '@' in word:
+                mask4movie[i] = 1
+        np.save('data/mask4key.npy', mask4key)
+        np.save('data/mask4movie.npy', mask4movie)
         json.dump(word2index, open('data/word2index_redial.json', 'w', encoding='utf-8'), ensure_ascii=False)
         np.save('data/word2vec_redial.npy', word2embedding)
 
@@ -136,16 +166,16 @@ class CRSDataset(Dataset):
         对数据集进行处理，包括填充、实体提取等操作
         """
 
-        def padding_word2vev(sentence, max_length, pad=0, end=2, unk=3):
+        def padding_word2vev(sentence, max_length):
             """
             对文本进行填充和词向量化
             """
-            vector = []
+            input_ids = []
             concept_mask = []
             dbpedia_mask = []
             for word in sentence:
-                vector.append(self.word2index.get(word, unk))
-                concept_mask.append(self.key2index.get(word.lower(), 0))
+                input_ids.append(self.word2index.get(word, self.special_wordIdx['<unk>']))
+                concept_mask.append(self.key2index.get(word.lower(), self.concept_min))
                 if '@' in word:
                     try:
                         entity = self.id2entity[int(word[1:])]
@@ -155,14 +185,11 @@ class CRSDataset(Dataset):
                     dbpedia_mask.append(id)
                 else:
                     dbpedia_mask.append(self.entity_max)
-            vector.append(end)
-            concept_mask.append(0)
-            dbpedia_mask.append(self.entity_max)
-            if len(vector) > max_length:
-                return vector[-max_length:], max_length, concept_mask[-max_length:], dbpedia_mask[-max_length:]
+            if len(input_ids) > max_length:
+                return input_ids[-max_length:], max_length, concept_mask[-max_length:], dbpedia_mask[-max_length:]
             else:
-                length = len(vector)
-                return vector + (max_length - len(vector)) * [pad], length, concept_mask + (max_length - len(vector)) * [0], dbpedia_mask + (max_length - len(vector)) * [self.entity_max]
+                length = len(input_ids)
+                return input_ids + (max_length - len(input_ids)) * [self.special_wordIdx['<pad>']], length, concept_mask + (max_length - len(input_ids)) * [self.concept_min], dbpedia_mask + (max_length - len(input_ids)) * [self.entity_max]
 
         data_set = []
         context_before = []
@@ -171,9 +198,9 @@ class CRSDataset(Dataset):
                 continue
             else:
                 context_before = case['contexts']  # 区别
-            contexts = sum((sen + ['_split_'] for sen in case['contexts'][-5:-1]), []) + case['contexts'][-1]
+            contexts = sum((sen + ['<mood>', '<split>'] for sen in case['contexts'][-5:-1]), []) + case['contexts'][-1] + ['<mood>'] + ['<eos>']
             context_vector, context_length, concept_mask, dbpedia_mask = padding_word2vev(contexts, self.max_c_length)
-            response_vector, r_length, _, _ = padding_word2vev(case['response'], self.max_r_length)
+            response_vector, r_length, _, _ = padding_word2vev(case['response'] + ['<eos>'], self.max_r_length)
             assert len(context_vector) == self.max_c_length
             assert len(concept_mask) == self.max_c_length
             assert len(dbpedia_mask) == self.max_c_length
@@ -302,7 +329,7 @@ class CRSDataset(Dataset):
                 user_vector[self.userId2userIdx[str(us)]] = 1
                 user_mentioned[point] = us
                 point += 1
-        return context_vector, response_vector, entity_vec, torch.tensor(dbpedia_mentioned, dtype=torch.long), torch.tensor(user_mentioned, dtype=torch.long), movie, torch.tensor(concept_mask, dtype=torch.long), np.array(dbpedia_mask), concept_vector, dbpedia_vector, user_vector, rec
+        return torch.tensor(context_vector, dtype=torch.long), torch.tensor(response_vector, dtype=torch.long), entity_vec, torch.tensor(dbpedia_mentioned, dtype=torch.long), torch.tensor(user_mentioned, dtype=torch.long), movie, torch.tensor(concept_mask, dtype=torch.long), np.array(dbpedia_mask), concept_vector, dbpedia_vector, user_vector, rec
 
     def __len__(self):
         return len(self.datapre)

@@ -33,23 +33,26 @@ class TrainLoop:
         self.embedding_size = 300
         self.n_heads = 2
         self.n_layers = 2
+        self.n_mood = 5
         self.ffn_size = 300
         self.n_relation = 64
+        self.vocab_size = 26158
         self.n_user = 1075
         self.dropout = 0.1
         self.attention_dropout = 0.0
         self.relu_dropout = 0.1
+        self.special_wordIdx = {'<pad>': 0, '<dbpedia>': 1, '<related>': 2, '<relation>': 3, '<concept>': 4, '<word>': 5, '<unk>': 6, '<user>': 7, '<mood>': 8, '<split>': 9, '<eos>': 10}
         self.entity2entityId = pkl.load(open('data/entity2entityId.pkl', 'rb'))
         self.id2entity = pkl.load(open('data/id2entity.pkl', 'rb'))
         self.text_dict = pkl.load(open('data/text_dict.pkl', 'rb'))
         self.userId2userIdx = json.load(open(self.crs_data_path + '/redial_userId2userIdx.jsonl', encoding='utf-8'))
         self.dbpedia_subkg = json.load(open(self.crs_data_path + '/dbpedia_subkg.jsonl', encoding='utf-8'))
-        # self.train_dataset=CRSDataset('toy_train', self)
-        # self.test_dataset = CRSDataset('toy_test', self)
-        # self.valid_dataset = CRSDataset('toy_valid', self)
-        self.train_dataset = CRSDataset('train', self)
-        self.test_dataset = CRSDataset('test', self)
-        self.valid_dataset = CRSDataset('valid', self)
+        self.train_dataset=CRSDataset('toy_train', self)
+        self.test_dataset = CRSDataset('toy_test', self)
+        self.valid_dataset = CRSDataset('toy_valid', self)
+        # self.train_dataset = CRSDataset('train', self)
+        # self.test_dataset = CRSDataset('test', self)
+        # self.valid_dataset = CRSDataset('valid', self)
         self.train_dataloader = torch.utils.data.DataLoader(dataset=self.train_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.test_dataloader = torch.utils.data.DataLoader(dataset=self.test_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
         self.valid_dataloader = torch.utils.data.DataLoader(dataset=self.valid_dataset, batch_size=self.batch_size, shuffle=False, drop_last=True)
@@ -58,7 +61,7 @@ class TrainLoop:
         self.dict = self.train_dataset.word2index
         self.movie_ids = pkl.load(open("data/movie_ids.pkl", "rb"))
         self.index2word = {self.dict[key]: key for key in self.dict}
-        self.model = CrossModel(self, self.dict).to(self.device)
+        self.model = CrossModel(self).to(self.device)
         self.optimizer = {k.lower(): v for k, v in torch.optim.__dict__.items() if not k.startswith('__') and k[0].isupper()}[self.optimizer]([p for p in self.model.parameters() if p.requires_grad], lr=self.learningrate, amsgrad=True, betas=(0.9, 0.999))
 
     def train(self, rec_epoch, gen_epoch):
@@ -137,7 +140,7 @@ class TrainLoop:
                     seed_set = entity[b].nonzero().view(-1).tolist()
                     seed_sets.append(seed_set)
                 _, _, rec_scores, rec_loss, gen_loss, _ = self.model(context.to(self.device), response.to(self.device), concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device), user_vector.to(self.device), dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
-                scores, preds, _, _, _, _, _ = self.model(context.to(self.device), None, concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device), user_vector.to(self.device), dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
+                scores, preds, _, _, _, _ = self.model(context.to(self.device), None, concept_mask, dbpedia_mask, seed_sets, movie, concept_vector.to(self.device), dbpedia_vector.to(self.device), user_vector.to(self.device), dbpedia_mentioned.to(self.device), user_mentioned.to(self.device), rec)
             tokens_response.extend(vector2sentence(response.cpu()))
             tokens_predict.extend(vector2sentence(preds.cpu()))
             tokens_context.extend(vector2sentence(context.cpu()))
@@ -204,6 +207,6 @@ class TrainLoop:
 
 if __name__ == '__main__':
     loop = TrainLoop()
-    loop.model.load_model('rec')
-    loop.train(rec_epoch=1, gen_epoch=1)
+    loop.model.load_model('gen')
+    # loop.train(rec_epoch=0, gen_epoch=1)
     met = loop.val(is_test=True)
